@@ -21,6 +21,5 @@ def start_tcp_server(port):
         conn, addr = s.accept()
         threading.Thread(target=handle_client, args=(conn, addr)).start()
 
-# Iniciar servidores TCP en los puertos 5055 y 5056
-threading.Thread(target=start_tcp_server, args=(5001,)).start()
-#threading.Thread(target=start_tcp_server, args=(5056,)).start()
+# Iniciar servidor TCP en el puerto 7012
+threading.Thread(target=start_tcp_server, args=(7012,)).start()
