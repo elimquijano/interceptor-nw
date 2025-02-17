@@ -23,9 +23,8 @@ def monitor_packet(data, source_ip, dest_port):
         pass
 
 def start_capture():
-    # Create raw socket (no port binding)
     sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-    print("Monitoreando trafico GPS...")
+    print("Monitoreando trafico TCP...")
 
     try:
         while True:
@@ -33,18 +32,22 @@ def start_capture():
             ip_header = packet[0][0:20]
             iph = struct.unpack('!BBHHHBBH4s4s', ip_header)
             
-            # Get IP and ports
             source_ip = socket.inet_ntoa(iph[8])
             tcp_header = packet[0][20:40]
             tcph = struct.unpack('!HHLLBBHHH', tcp_header)
+            source_port = tcph[0]
             dest_port = tcph[1]
+            
+            # Print all TCP traffic first
+            print("Detected: %s:%d -> port %d" % (source_ip, source_port, dest_port))
             
             # Get data portion
             header_size = 20 + (tcph[4] >> 4) * 4
             data = packet[0][header_size:]
             
-            # Monitor specific ports
+            # Monitor specific ports with data
             if dest_port in [5001, 5003, 5004, 5005] and len(data) > 0:
+                print("GPS Data found on port %d" % dest_port)
                 monitor_packet(data, source_ip, dest_port)
                 
     except KeyboardInterrupt:
