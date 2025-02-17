@@ -47,10 +47,12 @@ def parse_gps_data(data):
                 pass
     
     return None
-
 def start_capture():
     sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-    print("Monitoreando puerto 5001...")
+    print("Monitoreando puertos GPS comunes...")
+    
+    # Lista de puertos comunes para GPS
+    gps_ports = [5001, 5003, 5004, 5005, 5008, 5010, 7001, 8001, 9001]
     
     try:
         while True:
@@ -69,7 +71,8 @@ def start_capture():
             header_size = 20 + (tcph[4] >> 4) * 4
             data = raw_data[header_size:]
             
-            if dest_port == 5001 and len(data) > 0:
+            if dest_port in gps_ports and len(data) > 0:
+                print("Puerto detectado: %d" % dest_port)
                 gps_data = parse_gps_data(data)
                 if gps_data:
                     print("[%s] GPS Data:" % datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -80,6 +83,7 @@ def start_capture():
     except KeyboardInterrupt:
         print("\nCaptura terminada")
         sock.close()
+
 
 if __name__ == "__main__":
     start_capture()
