@@ -1,61 +1,50 @@
+#!/usr/bin/env python2
 import socket
-import datetime
 import struct
-import binascii
 
-def monitor_packet(data, source_ip, dest_port):
-    # Check GPS protocols
+def main():
     try:
-        if b'$$' in data:  # Coban
-            print("[%s] Coban data desde %s" % (
-                datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                source_ip
-            ))
-        elif b'*HQ' in data:  # GT06
-            print("[%s] GT06 data desde %s" % (
-                datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                source_ip
-            ))
-        print("Puerto: %d" % dest_port)
-        print("Data: %s" % data)
-        print("-" * 50)
-    except:
-        pass
+        # Crea una socket RAW para capturar todo el tráfico
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
+    except socket.error as msg:
+        print("Error al crear la socket: {} {}".format(msg[0], msg[1]))
+        return
 
-def start_capture():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-    print("Monitoreando trafico TCP puerto 8082...")
-
-    try:
-        while True:
-            packet = sock.recvfrom(65565)
-            ip_header = packet[0][0:20]
-            iph = struct.unpack('!BBHHHBBH4s4s', ip_header)
+    print("Capturando paquetes en tiempo real en el puerto 8082...")
+    
+    while True:
+        packet, addr = s.recvfrom(65565)
+        eth_length = 14
+        eth_header = packet[:eth_length]
+        eth = struct.unpack("!6s6sH", eth_header)
+        eth_protocol = socket.ntohs(eth[2])
+        
+        # Procesa solo paquetes IP (0x0800)
+        if eth_protocol == 0x0800:
+            # Extrae el header IP
+            ip_header = packet[eth_length:eth_length+20]
+            iph = struct.unpack("!BBHHHBBH4s4s", ip_header)
+            version_ihl = iph[0]
+            ihl = version_ihl & 0xF
+            iph_length = ihl * 4
+            protocol = iph[6]
             
-            source_ip = socket.inet_ntoa(iph[8])
-            tcp_header = packet[0][20:40]
-            tcph = struct.unpack('!HHLLBBHHH', tcp_header)
-            source_port = tcph[0]
-            dest_port = tcph[1]
-            
-            # Get data portion
-            header_size = 20 + (tcph[4] >> 4) * 4
-            data = packet[0][header_size:]
-            
-            # Monitor port 8082
-            if dest_port == 8082 and len(data) > 0:
-                print("\nDatos hacia puerto 8082:")
-                print("Origen: %s:%d" % (source_ip, source_port))
-                print("Datos HEX: %s" % binascii.hexlify(data))
-                try:
-                    print("Datos ASCII: %s" % data)
-                except:
-                    pass
-                print("-" * 50)
+            # Procesa solo paquetes TCP (protocolo 6)
+            if protocol == 6:
+                t = eth_length + iph_length
+                tcp_header = packet[t:t+20]
+                tcph = struct.unpack("!HHLLBBHHH", tcp_header)
+                src_port = tcph[0]
+                dest_port = tcph[1]
                 
-    except KeyboardInterrupt:
-        print("\nCaptura terminada")
-        sock.close()
+                # Filtra paquetes donde el puerto origen o destino es 8082
+                if src_port == 8082 or dest_port == 8082:
+                    doff_reserved = tcph[4]
+                    tcph_length = (doff_reserved >> 4) * 4
+                    header_size = eth_length + iph_length + tcph_length
+                    data = packet[header_size:]
+                    
+                    print("Paquete: {} -> {}  Payload: {}".format(src_port, dest_port, data))
 
-if __name__ == "__main__":
-    start_capture()
+if __name__ == '__main__':
+    main()
