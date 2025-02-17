@@ -20,8 +20,8 @@ def start_capture():
             dest_port = (tcp_header[2] << 8) + tcp_header[3]
             if dest_port == 5001:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                print(f"[{timestamp}] Datos capturados:")
-                print(f"Raw data: {packet.hex()}")
+                print("[%s] Datos capturados:" % timestamp)
+                print("Raw data: %s" % packet.encode('hex'))
                 print("-" * 50)
                 
     except KeyboardInterrupt:
