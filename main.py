@@ -1,8 +1,9 @@
 import socket
 import datetime
+import struct
 
 def start_capture():
-    # Create raw socket to just monitor port 5001
+    # Create raw socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
     print("Monitoreando puerto 5001...")
     
@@ -12,12 +13,14 @@ def start_capture():
             raw_packet = sock.recvfrom(65565)
             packet = raw_packet[0]
             
-            # Extract TCP header and data
-            ip_header = packet[0:20]
-            tcp_header = packet[20:40]
+            # Get IP header
+            ip_header = struct.unpack('!BBHHHBBH4s4s', packet[:20])
+            iph_length = (ip_header[0] & 0xF) * 4
             
-            # Check if packet is for port 5001
-            dest_port = (tcp_header[2] << 8) + tcp_header[3]
+            # Get TCP header
+            tcp_header = struct.unpack('!HHLLBBHHH', packet[iph_length:iph_length+20])
+            dest_port = tcp_header[1]
+            
             if dest_port == 5001:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 print("[%s] Datos capturados:" % timestamp)
