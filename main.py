@@ -13,7 +13,7 @@ def start_capture():
     try:
         while True:
             client, addr = server.accept()
-            print("[%s] Conexión desde %s:%d" % (
+            print("[%s] Conexion desde %s:%d" % (
                 datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 addr[0], 
                 addr[1]
