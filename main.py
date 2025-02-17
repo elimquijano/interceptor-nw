@@ -1,25 +1,24 @@
-# -*- coding: utf-8 -*-
-import socket
-import threading
+from scapy.all import *
+import datetime
 
-def handle_client(conn, addr):
-    print("Conexión establecida por {}".format(addr))
-    while True:
-        data = conn.recv(1024)  # Recibir datos
-        if not data:
-            break  # Salir si no hay más datos
-        print("Datos recibidos de {}: {}".format(addr, data.decode('utf-8')))
-        # Aquí puedes procesar los datos como desees
-    conn.close()
+def packet_callback(packet):
+    if packet.haslayer(TCP) and packet.haslayer(Raw):
+        if packet[TCP].dport == 5001:
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            src_ip = packet[IP].src
+            payload = packet[Raw].load
+            
+            print("[%s] Datos desde %s:" % (timestamp, src_ip))
+            print("Payload (hex): %s" % payload.encode('hex'))
+            try:
+                print("Payload (utf-8, si es legible): %s" % payload)
+            except UnicodeDecodeError:
+                print("Payload no es texto legible")
+            print("-" * 50)
 
-def start_tcp_server(port):
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(('0.0.0.0', port))
-    s.listen(5)
-    print("Servidor TCP escuchando en el puerto {}".format(port))
-    while True:
-        conn, addr = s.accept()
-        threading.Thread(target=handle_client, args=(conn, addr)).start()
+def start_capture():
+    print("Iniciando captura de paquetes en puerto 5001...")
+    sniff(filter="tcp and port 5001", prn=packet_callback, store=0)
 
-# Iniciar servidor TCP en el puerto 7012
-threading.Thread(target=start_tcp_server, args=(7012,)).start()
+if __name__ == "__main__":
+    start_capture()
