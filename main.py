@@ -24,7 +24,7 @@ def monitor_packet(data, source_ip, dest_port):
 
 def start_capture():
     sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
-    print("Monitoreando trafico TCP...")
+    print("Monitoreando trafico TCP puerto 8082...")
 
     try:
         while True:
@@ -38,17 +38,20 @@ def start_capture():
             source_port = tcph[0]
             dest_port = tcph[1]
             
-            # Print all TCP traffic first
-            print("Detected: %s:%d -> port %d" % (source_ip, source_port, dest_port))
-            
             # Get data portion
             header_size = 20 + (tcph[4] >> 4) * 4
             data = packet[0][header_size:]
             
-            # Monitor specific ports with data
-            if dest_port in [5001, 5003, 5004, 5005] and len(data) > 0:
-                print("GPS Data found on port %d" % dest_port)
-                monitor_packet(data, source_ip, dest_port)
+            # Monitor port 8082
+            if dest_port == 8082 and len(data) > 0:
+                print("\nDatos hacia puerto 8082:")
+                print("Origen: %s:%d" % (source_ip, source_port))
+                print("Datos HEX: %s" % binascii.hexlify(data))
+                try:
+                    print("Datos ASCII: %s" % data)
+                except:
+                    pass
+                print("-" * 50)
                 
     except KeyboardInterrupt:
         print("\nCaptura terminada")
