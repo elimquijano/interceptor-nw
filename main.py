@@ -4,7 +4,7 @@ import json
 
 DEVICE_PORTS = [6001, 6013]  # Ports GPS devices connect to
 TRACCAR_PORTS = [5001, 5013]  # Ports Traccar will listen on
-ADDITIONAL_PORT = 7012  # Additional port to send data to
+ADDITIONAL_PORT = 7006  # Additional port to send data to
 
 def handle_client(client_socket, client_address, device_port, traccar_port):
     print(f"Proxy: Connection from {client_address} on device port {device_port}")
