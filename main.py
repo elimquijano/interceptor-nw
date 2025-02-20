@@ -2,8 +2,8 @@ import socket
 import threading
 import json
 
-DEVICE_PORTS = [5013, 5001]  # Ports GPS devices connect to
-TRACCAR_PORTS = [5113, 5101]  # Ports Traccar will listen on
+DEVICE_PORTS = [5001, 5013]  # Ports GPS devices connect to
+TRACCAR_PORTS = [6001, 6013]  # Ports Traccar will listen on
 ADDITIONAL_PORT = 7012  # Additional port to send data to
 
 def handle_client(client_socket, client_address, device_port, traccar_port):
