@@ -1,10 +1,14 @@
 import socket
+import time
 
 # Puerto de escucha para el dispositivo GPS
 DEVICE_PORT = 6013
 # Puerto donde Traccar está escuchando para dispositivos Sinotrack
 TRACCAR_HOST = 'localhost'  # Dirección del servidor Traccar
 TRACCAR_PORT = 5013  # Puerto de Traccar para Sinotrack (puerto 5013)
+
+# Tiempo para enviar un paquete "keep-alive" (por ejemplo, cada 30 segundos)
+KEEP_ALIVE_INTERVAL = 30  # Segundos
 
 # Función para manejar la conexión y escuchar los datos
 def listen_for_data():
@@ -38,7 +42,10 @@ def listen_for_data():
 
                     # Aquí puedes realizar el tratamiento de los datos para tus necesidades
                     # process_data(data)
-                    
+
+                    # Enviar keep-alive después de recibir cada paquete
+                    send_keep_alive()
+
             except Exception as e:
                 print(f"Error al recibir datos: {e}")
             finally:
@@ -68,6 +75,26 @@ def forward_to_traccar(data):
     
     except Exception as e:
         print(f"Error al reenviar los datos a Traccar: {e}")
+
+# Función para enviar un paquete "keep-alive" a Traccar
+def send_keep_alive():
+    try:
+        # Crear un socket para la conexión con Traccar
+        traccar_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # Conectar al servidor Traccar
+        traccar_socket.connect((TRACCAR_HOST, TRACCAR_PORT))
+
+        # Enviar un paquete vacío o mínimo para mantener viva la conexión
+        traccar_socket.sendall(b'\x00')  # Paquete vacío (simulando un keep-alive)
+
+        # Cerrar la conexión con Traccar
+        traccar_socket.close()
+
+        print("Keep-alive enviado a Traccar")
+
+    except Exception as e:
+        print(f"Error al enviar keep-alive a Traccar: {e}")
 
 # Iniciar la función para escuchar
 if __name__ == "__main__":
