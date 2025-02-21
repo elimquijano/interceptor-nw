@@ -1,6 +1,7 @@
 import socket
 import threading
 import json
+from datetime import datetime
 
 DEVICE_PORTS = [6001, 6013]  # Ports GPS devices connect to
 TRACCAR_PORTS = [5001, 5013]  # Ports Traccar will listen on
@@ -35,6 +36,7 @@ def handle_client(client_socket, client_address, device_port, traccar_port):
                 data_json = json.dumps(data_dict).encode('utf-8')
                 additional_socket.sendall(data_json)
                 additional_socket.close()
+                print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
                 print(f"Proxy: Sent data to additional port {ADDITIONAL_PORT} from device port {device_port}")
             except Exception as e:
                 print(f"Proxy: Error sending to additional port {ADDITIONAL_PORT}: {e}")
