@@ -67,9 +67,53 @@ def start_proxy_server(device_port, traccar_port):
     finally:
         proxy_socket.close()
 
+def start_udp_proxy_server(device_port, traccar_port):
+    proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        proxy_socket.bind(('0.0.0.0', device_port))
+    except OSError as e:
+        print(f"Error binding to device port {device_port}: {e}")
+        return
+    print(f"Proxy: Listening on UDP device port {device_port}")
+
+    try:
+        while True:
+            data, client_address = proxy_socket.recvfrom(1024)
+            print(f"Proxy: Received UDP data from client on device port {device_port}: {data.decode('utf-8')}")
+
+            # Send to Traccar
+            try:
+                traccar_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                traccar_socket.connect(('127.0.0.1', traccar_port))
+                traccar_socket.sendall(data)
+                traccar_socket.close()
+                print(f"Proxy: Sent UDP data to Traccar on port {traccar_port}")
+            except Exception as e:
+                print(f"Proxy: Error sending UDP data to Traccar on port {traccar_port}: {e}")
+
+            # Send to additional port
+            try:
+                additional_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                additional_socket.connect(('127.0.0.1', ADDITIONAL_PORT))
+                # Include the device port in the data being sent
+                data_dict = {"port": device_port, "data": data.decode('utf-8')}
+                data_json = json.dumps(data_dict).encode('utf-8')
+                additional_socket.sendall(data_json)
+                additional_socket.close()
+                print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                print(f"Proxy: Sent UDP data to additional port {ADDITIONAL_PORT} from device port {device_port}")
+            except Exception as e:
+                print(f"Proxy: Error sending UDP data to additional port {ADDITIONAL_PORT}: {e}")
+
+    except KeyboardInterrupt:
+        print("Proxy: Shutting down.")
+    finally:
+        proxy_socket.close()
+
 if __name__ == "__main__":
     if not (len(DEVICE_PORTS) == len(TRACCAR_PORTS)):
-        print("Error: DEVICE_PORTS, and TRACCAR_PORTS must have the same number of elements.")
+        print("Error: DEVICE_PORTS and TRACCAR_PORTS must have the same number of elements.")
     else:
         for i in range(len(DEVICE_PORTS)):
             threading.Thread(target=start_proxy_server, args=(DEVICE_PORTS[i], TRACCAR_PORTS[i])).start()
+            threading.Thread(target=start_udp_proxy_server, args=(DEVICE_PORTS[i], TRACCAR_PORTS[i])).start()
