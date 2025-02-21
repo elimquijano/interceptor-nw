@@ -23,7 +23,7 @@ def listen_for_data():
     for port in DEVICE_PORTS.keys():
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.bind(('0.0.0.0', port))
-        server_socket.listen(0)
+        server_socket.listen(25)
         server_sockets[port] = server_socket
         print(f"Escuchando en el puerto {port}...")
 
