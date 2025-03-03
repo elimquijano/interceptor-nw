@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from __future__ import print_function
 import socket
 import json
 import threading
@@ -23,7 +24,7 @@ TRACCAR_HOST = 'localhost'
 def listen_for_data():
     # Crear el socket TCP para escuchar en múltiples puertos
     server_sockets = {}
-    
+
     for port in DEVICE_PORTS.keys():
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # Permitir reutilización de direcciones
@@ -35,49 +36,49 @@ def listen_for_data():
         # pero mantenerlo razonable para evitar problemas de rendimiento
         server_socket.listen(100)
         server_sockets[port] = server_socket
-        print(f"Escuchando en el puerto {port}...")
-    
+        print("Escuchando en el puerto {}...".format(port))
+
     # Lista de todos los sockets de servidor para select
     inputs = list(server_sockets.values())
-    
+
     # Mantener el servidor funcionando
     try:
         while True:
             # Usar select para monitorear múltiples sockets sin bloquear
             readable, _, exceptional = select.select(inputs, [], inputs, 0.1)
-            
+
             for sock in readable:
                 for port, server_sock in server_sockets.items():
                     if sock == server_sock:
                         # Nueva conexión entrante
                         client_socket, client_address = server_sock.accept()
-                        print(f"Conexión aceptada desde {client_address} en el puerto {port}")
-                        
+                        print("Conexión aceptada desde {} en el puerto {}".format(client_address, port))
+
                         # Crear un hilo para manejar cada conexión
                         client_handler = threading.Thread(
-                            target=handle_device_data, 
+                            target=handle_device_data,
                             args=(port, client_socket)
                         )
                         # Configurar como daemon para que el hilo se cierre cuando se cierre el programa principal
                         client_handler.daemon = True
                         client_handler.start()
-            
+
             # Verificar sockets con problemas
             for sock in exceptional:
-                print(f"Error en socket, cerrando...")
+                print("Error en socket, cerrando...")
                 sock.close()
                 inputs.remove(sock)
-            
+
             # Pequeña pausa para evitar consumo excesivo de CPU
             time.sleep(0.01)
-    
+
     except KeyboardInterrupt:
         print("Cerrando el servidor...")
     finally:
         # Cerrar todos los sockets del servidor
         for port, server_socket in server_sockets.items():
             server_socket.close()
-            print(f"Socket del servidor en puerto {port} cerrado")
+            print("Socket del servidor en puerto {} cerrado".format(port))
 
 # Función para reenviar datos entre dos sockets
 def forward_data(source_socket, destination_socket, source_name, dest_name, buffer_size=1024):
@@ -86,16 +87,16 @@ def forward_data(source_socket, destination_socket, source_name, dest_name, buff
             # Leer datos del socket de origen
             data = source_socket.recv(buffer_size)
             if not data:
-                print(f"Conexión cerrada desde {source_name}")
+                print("Conexión cerrada desde {}".format(source_name))
                 break
-                
+
             # Enviar datos al socket de destino
             destination_socket.sendall(data)
-            print(f"Datos reenviados de {source_name} a {dest_name}: {len(data)} bytes")
-            
+            print("Datos reenviados de {} a {}: {} bytes".format(source_name, dest_name, len(data)))
+
             return data  # Devolver los datos para que puedan usarse con JSON_PORT
     except Exception as e:
-        print(f"Error al reenviar datos de {source_name} a {dest_name}: {e}")
+        print("Error al reenviar datos de {} a {}: {}".format(source_name, dest_name, e))
         return None
 
 # Función para manejar los datos de un dispositivo
@@ -106,26 +107,26 @@ def handle_device_data(port, client_socket):
         traccar_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             traccar_socket.connect((TRACCAR_HOST, DEVICE_PORTS[port]))
-        except ConnectionRefusedError:
-            print(f"Conexión rechazada por Traccar en puerto {DEVICE_PORTS[port]}. ¿El servidor está ejecutándose?")
+        except socket.error as e:
+            print("Conexión rechazada por Traccar en puerto {}. ¿El servidor está ejecutándose? Error: {}".format(DEVICE_PORTS[port], e))
             return
-        
+
         # Configuración bidireccional - permitir respuestas de Traccar al dispositivo
-        device_name = f"dispositivo (puerto {port})"
-        traccar_name = f"Traccar (puerto {DEVICE_PORTS[port]})"
-        
+        device_name = "dispositivo (puerto {})".format(port)
+        traccar_name = "Traccar (puerto {})".format(DEVICE_PORTS[port])
+
         # Configurar sockets como no bloqueantes para select
         client_socket.setblocking(0)
         traccar_socket.setblocking(0)
-        
+
         # Monitorear ambos sockets
         inputs = [client_socket, traccar_socket]
         running = True
-        
+
         while running:
             try:
                 readable, _, exceptional = select.select(inputs, [], inputs, 1)
-                
+
                 for sock in readable:
                     if sock == client_socket:
                         # Datos del dispositivo GPS hacia Traccar
@@ -136,28 +137,28 @@ def handle_device_data(port, client_socket):
                         else:
                             running = False
                             break
-                            
+
                     elif sock == traccar_socket:
                         # Datos de Traccar hacia el dispositivo GPS (respuesta)
                         if not forward_data(traccar_socket, client_socket, traccar_name, device_name):
                             running = False
                             break
-                
+
                 # Verificar sockets con problemas
                 for sock in exceptional:
-                    print(f"Error en socket durante comunicación, cerrando...")
+                    print("Error en socket durante comunicación, cerrando...")
                     running = False
-            
-            except (ConnectionResetError, ConnectionAbortedError) as e:
-                print(f"Conexión reiniciada o abortada: {e}")
+
+            except (socket.error, socket.timeout) as e:
+                print("Conexión reiniciada o abortada: {}".format(e))
                 running = False
             except Exception as e:
-                print(f"Error durante la comunicación de datos: {e}")
+                print("Error durante la comunicación de datos: {}".format(e))
                 running = False
-                
+
     except Exception as e:
-        print(f"Error al manejar conexión en puerto {port}: {e}")
-    
+        print("Error al manejar conexión en puerto {}: {}".format(port, e))
+
     finally:
         # Cerrar las conexiones
         if client_socket:
@@ -170,7 +171,7 @@ def handle_device_data(port, client_socket):
                 traccar_socket.close()
             except:
                 pass
-        print(f"Conexión finalizada para dispositivo en puerto {port}")
+        print("Conexión finalizada para dispositivo en puerto {}".format(port))
 
 # Función para enviar los datos en formato JSON al puerto 7005
 def send_to_json_port(port, data):
@@ -181,31 +182,31 @@ def send_to_json_port(port, data):
             decoded_data = data.decode('utf-8', errors='replace')
         except:
             decoded_data = data.hex()
-        
+
         # Crear un socket para enviar los datos en formato JSON
         json_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         json_socket.settimeout(2)  # Timeout corto para no bloquear
-        
+
         # Conectar al puerto 7005
         try:
             json_socket.connect(('localhost', JSON_PORT))
-            
+
             # Crear el diccionario con los datos y puerto
             json_data = {
                 "port": port,
                 "data": decoded_data,
                 "timestamp": time.time()
             }
-            
+
             # Convertir a JSON y enviar
             json_socket.sendall(json.dumps(json_data).encode('utf-8'))
-        except ConnectionRefusedError:
+        except socket.error:
             # Silenciosamente fallar si el puerto JSON no está disponible
             pass
-        
+
     except Exception as e:
-        print(f"Error al enviar datos al puerto JSON: {e}")
-    
+        print("Error al enviar datos al puerto JSON: {}".format(e))
+
     finally:
         # Cerrar el socket
         if json_socket:
