@@ -90,11 +90,12 @@ def forward_data(source_socket, destination_socket, source_name, dest_name, buff
 
             # Enviar datos al socket de destino
             destination_socket.sendall(data)
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Datos reenviados de {source_name} a {dest_name}: {len(data)} bytes")
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} De {source_name} a {dest_name}: {len(data)} bytes")
+            print(data)
 
             return data  # Devolver los datos para que puedan usarse con JSON_PORT
     except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Error al reenviar datos de {source_name} a {dest_name}: {e}")
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Error de {source_name} a {dest_name}: {e}")
         return None
 
 # Función para manejar los datos de un dispositivo
