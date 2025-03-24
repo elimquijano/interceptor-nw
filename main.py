@@ -75,6 +75,13 @@ def forward_data(
     source_socket, destination_socket, source_name, dest_name, buffer_size=1024
 ):
     try:
+        # Verificar si el socket de origen está cerrado
+        if source_socket.fileno() == -1:
+            print(
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Socket de origen {source_name} cerrado."
+            )
+            return None
+
         # Leer datos del socket de origen
         data = source_socket.recv(buffer_size)
         if not data:
@@ -82,15 +89,28 @@ def forward_data(
                 f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Conexión cerrada desde {source_name}"
             )
             return None
+
+        # Verificar si el socket de destino está cerrado
+        if destination_socket.fileno() == -1:
+            print(
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Socket de destino {dest_name} cerrado."
+            )
+            return None
+
         # Enviar datos al socket de destino
         destination_socket.sendall(data)
         print(
             f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} De {source_name} a {dest_name}: {len(data)} bytes"
         )
         return data  # Devolver los datos para que puedan usarse con JSON_PORT
+    except socket.error as e:
+        print(
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Error de socket de {source_name} a {dest_name}: {e}"
+        )
+        return None
     except Exception as e:
         print(
-            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Error de {source_name} a {dest_name}: {e}"
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Error inesperado de {source_name} a {dest_name}: {e}"
         )
         return None
 
@@ -175,19 +195,16 @@ def handle_device_data(port, client_socket):
 # Función mejorada para manejar datos UDP
 def handle_udp_data(port, data, client_address, udp_server_socket):
     try:
-        # Generar un identificador para este dispositivo
         device_id = get_device_id(port, client_address)
-        # Enviar los datos al puerto JSON
         send_to_json_port(port, data)
+
         with udp_lock:
-            # Guardar la dirección del cliente para enviar respuestas posteriormente
             udp_client_addresses[device_id] = client_address
-            # Verificar si ya existe una conexión para este dispositivo
+
             if (
                 device_id not in udp_traccar_connections
                 or not udp_traccar_connections[device_id]
             ):
-                # Crear una nueva conexión TCP a Traccar
                 traccar_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 try:
                     traccar_socket.connect((TRACCAR_HOST, DEVICE_PORTS[port]))
@@ -200,29 +217,24 @@ def handle_udp_data(port, data, client_address, udp_server_socket):
                         f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Conexión rechazada por Traccar en puerto {DEVICE_PORTS[port]} para UDP. Error: {e}"
                     )
                     return
-            # Usar la conexión existente
+
             traccar_socket = udp_traccar_connections[device_id]
 
-        # Enviar datos al servidor Traccar
-        try:
-            traccar_socket.sendall(data)
+        # Verificar si el socket está cerrado antes de enviar datos
+        if traccar_socket.fileno() == -1:
             print(
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Datos UDP de {client_address} a Traccar (puerto {DEVICE_PORTS[port]}): {len(data)} bytes"
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Socket cerrado para {device_id}. Reiniciando conexión..."
             )
-        except Exception as e:
-            print(
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Error al enviar datos a Traccar: {e}"
-            )
-            # Marcar la conexión como cerrada para que se restablezca
             with udp_lock:
-                try:
-                    traccar_socket.close()
-                except:
-                    pass
                 udp_traccar_connections[device_id] = None
             return
 
-        # Iniciar un hilo para escuchar respuestas de Traccar
+        traccar_socket.sendall(data)
+        print(
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Datos UDP de {client_address} a Traccar (puerto {DEVICE_PORTS[port]}): {len(data)} bytes"
+        )
+
+        # Iniciar hilo para escuchar respuestas de Traccar
         response_handler = threading.Thread(
             target=listen_for_traccar_response, args=(device_id, udp_server_socket)
         )
@@ -242,21 +254,22 @@ def listen_for_traccar_response(device_id, udp_server_socket):
             or not udp_traccar_connections[device_id]
         ):
             return
+
         traccar_socket = udp_traccar_connections[device_id]
         if device_id not in udp_client_addresses:
             return
+
         client_address = udp_client_addresses[device_id]
 
     try:
         # Verificar si el socket está cerrado
         if traccar_socket.fileno() == -1:
             print(
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Socket cerrado para {device_id}"
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Socket cerrado para {device_id}. Reiniciando conexión..."
             )
+            with udp_lock:
+                udp_traccar_connections[device_id] = None
             return
-
-        # Configurar el socket para no bloquear pero con un timeout
-        traccar_socket.setblocking(0)
 
         # Usar select para esperar datos sin bloquear completamente
         ready, _, _ = select.select([traccar_socket], [], [], 0.5)
@@ -264,7 +277,6 @@ def listen_for_traccar_response(device_id, udp_server_socket):
             try:
                 response_data = traccar_socket.recv(1024)
                 if response_data:
-                    # Enviar respuesta de vuelta al cliente UDP
                     udp_server_socket.sendto(response_data, client_address)
                     print(
                         f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Respuesta de Traccar al cliente UDP {client_address}: {len(response_data)} bytes"
@@ -273,7 +285,6 @@ def listen_for_traccar_response(device_id, udp_server_socket):
                 print(
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Error al recibir datos de Traccar para {device_id}: {e}"
                 )
-                # Marcar la conexión como cerrada para que se restablezca
                 with udp_lock:
                     try:
                         traccar_socket.close()
