@@ -218,10 +218,10 @@ def handle_udp_data(port, data, client_address, udp_server_socket):
         # Generar un identificador para este dispositivo
         device_id = get_device_id(port, client_address)
 
-        # Verificar si el número está en la lista de omitidos
+        # Verificar si el número está en la lista de omitidos y si contiene "tracker"
         decoded_data = data.decode("utf-8", errors="ignore")
         for number in omit_numbers:
-            if number in decoded_data:
+            if number in decoded_data and "tracker" in decoded_data:
                 print(f"Datos omitidos para el número {number}.")
                 return
 
