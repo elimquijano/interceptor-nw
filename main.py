@@ -26,6 +26,9 @@ udp_client_addresses = {}
 # Bloqueo para acceso seguro a los diccionarios compartidos
 udp_lock = threading.Lock()
 
+# Diccionario para mantener el estado de los números que deben ser omitidos
+omit_numbers = {}
+
 
 # Función para manejar la conexión y escuchar los datos (TCP y UDP)
 def listen_for_data():
@@ -91,6 +94,20 @@ def listen_for_data():
                                 f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Datos UDP recibidos desde {client_address} en el puerto {port}"
                             ) """
                             print(f"Datos recibidos: {data}")
+
+                            # Verificar si el comando es para desactivar o activar un número
+                            command = data.decode("utf-8", errors="ignore")
+                            if command.startswith("desactivate:"):
+                                number = command.split(":")[1]
+                                omit_numbers[number] = True
+                                print(f"Número {number} desactivado.")
+                                continue
+                            elif command.startswith("activate:"):
+                                number = command.split(":")[1]
+                                if number in omit_numbers:
+                                    del omit_numbers[number]
+                                print(f"Número {number} activado.")
+                                continue
 
                             # Manejar los datos UDP de forma optimizada
                             handle_udp_data(port, data, client_address, server_sock)
@@ -200,6 +217,13 @@ def handle_udp_data(port, data, client_address, udp_server_socket):
     try:
         # Generar un identificador para este dispositivo
         device_id = get_device_id(port, client_address)
+
+        # Verificar si el número está en la lista de omitidos
+        decoded_data = data.decode("utf-8", errors="ignore")
+        for number in omit_numbers:
+            if number in decoded_data:
+                print(f"Datos omitidos para el número {number}.")
+                return
 
         # Enviar los datos al puerto JSON
         send_to_json_port(port, data)
