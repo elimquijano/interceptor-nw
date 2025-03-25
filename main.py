@@ -49,7 +49,6 @@ def listen_for_data():
         udp_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         udp_server_socket.setblocking(0)
         udp_server_socket.bind(("0.0.0.0", port))
-        udp_server_socket.listen(200)
         udp_server_sockets[port] = udp_server_socket
         # print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Escuchando UDP en el puerto {port}...")
 
