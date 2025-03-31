@@ -4,6 +4,7 @@ import threading
 import select
 import time
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from collections import defaultdict
 
@@ -31,10 +32,16 @@ udp_lock = threading.Lock()
 omit_numbers = {}
 
 # Configuración del logging
+log_filename = "debug_date.log"
 logging.basicConfig(
     level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger()
+handler = TimedRotatingFileHandler(
+    log_filename, when="midnight", interval=1, backupCount=30
+)
+handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(handler)
 
 
 # Función para manejar la conexión y escuchar los datos (TCP y UDP)
