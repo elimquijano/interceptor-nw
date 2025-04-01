@@ -4,624 +4,494 @@ import threading
 import select
 import time
 from datetime import datetime
-from collections import defaultdict, deque
+from queue import Queue
 import logging
+import os
 
-# Configuración de logging
+# Configure logging
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
 logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.DEBUG
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(os.path.join(log_dir, f"proxy_{datetime.now().strftime('%Y%m%d')}.log")),
+        logging.StreamHandler()
+    ]
 )
+logger = logging.getLogger("gps_proxy")
 
-# Puertos de escucha para los dispositivos GPS
+# Ports for GPS devices
 DEVICE_PORTS = {
     6013: 5013,  # Sinotrack: 6013 -> Traccar 5013
     6001: 5001,  # Coban: 6001 -> Traccar 5001
     6027: 5027,  # Teltonika: 6027 -> Traccar 5027
 }
 
-# Puerto adicional para enviar la data en formato JSON
+# Additional port for JSON data
 JSON_PORT = 7005
 
-# Dirección del servidor Traccar
+# Traccar server address
 TRACCAR_HOST = "localhost"
 
-# Estructura para mantener conexiones UDP persistentes a Traccar
-# Usamos un diccionario anidado para mejor organización
-udp_connections = {
-    "sockets": {},  # Almacena socket TCP conectado a Traccar
-    "addresses": {},  # Almacena dirección del cliente UDP
-    "last_active": {},  # Timestamp de última actividad
-    "message_queue": {},  # Cola de mensajes para cada conexión
-}
+# Use a thread pool for handling connections
+MAX_WORKERS = 300  # Maximum number of worker threads
+worker_queue = Queue()
+active_workers = 0
+worker_lock = threading.Lock()
 
-# Bloqueo para acceso seguro a los diccionarios compartidos
+# Dictionary to maintain TCP connections to Traccar
+tcp_connections = {}
+tcp_lock = threading.Lock()
+
+# Dictionary to maintain UDP connections
+udp_connections = {}
+udp_client_addresses = {}
 udp_lock = threading.Lock()
 
-# Diccionario para mantener el estado de los números que deben ser omitidos
-omit_numbers = {}
+# Queue for JSON data
+json_queue = Queue(maxsize=5000)  # Limit queue size to prevent memory issues
 
-# Tiempo máximo de inactividad antes de cerrar una conexión (segundos)
-MAX_IDLE_TIME = 300  # 5 minutos
+# Function to initialize worker threads
+def init_workers():
+    for _ in range(MAX_WORKERS):
+        worker = threading.Thread(target=worker_function)
+        worker.daemon = True
+        worker.start()
 
-# Tamaño máximo de la cola de mensajes por conexión
-MAX_QUEUE_SIZE = 20
+# Worker function to process tasks from queue
+def worker_function():
+    global active_workers
+    while True:
+        try:
+            task, args = worker_queue.get()
+            with worker_lock:
+                active_workers += 1
+            
+            try:
+                task(*args)
+            except Exception as e:
+                logger.error(f"Error in worker task: {e}")
+            
+            with worker_lock:
+                active_workers -= 1
+            
+            worker_queue.task_done()
+        except Exception as e:
+            logger.error(f"Worker error: {e}")
 
-
-# Función para manejar la conexión y escuchar los datos (TCP y UDP)
+# Function to handle listening for data on multiple ports
 def listen_for_data():
-    # Crear sockets TCP para escuchar en múltiples puertos
+    # Create TCP and UDP server sockets
     tcp_server_sockets = {}
-    # Crear sockets UDP para escuchar en los mismos puertos
     udp_server_sockets = {}
 
     for port in DEVICE_PORTS.keys():
-        # Configurar socket TCP
-        tcp_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tcp_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        tcp_server_socket.setblocking(0)
-        tcp_server_socket.bind(("0.0.0.0", port))
-        tcp_server_socket.listen(200)
-        tcp_server_sockets[port] = tcp_server_socket
-        logging.info(f"Escuchando TCP en el puerto {port}...")
+        # Configure TCP socket
+        try:
+            tcp_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            tcp_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            tcp_server_socket.setblocking(0)
+            tcp_server_socket.bind(("0.0.0.0", port))
+            tcp_server_socket.listen(200)  # Allow up to 200 pending connections
+            tcp_server_sockets[port] = tcp_server_socket
+            logger.info(f"Listening for TCP on port {port}...")
+        except Exception as e:
+            logger.error(f"Failed to set up TCP socket on port {port}: {e}")
 
-        # Configurar socket UDP
-        udp_server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        udp_server_socket.setblocking(0)
-        udp_server_socket.bind(("0.0.0.0", port))
-        udp_server_sockets[port] = udp_server_socket
-        logging.info(f"Escuchando UDP en el puerto {port}...")
+        # Configure UDP socket
+        try:
+            udp_server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            udp_server_socket.setblocking(0)
+            udp_server_socket.bind(("0.0.0.0", port))
+            udp_server_sockets[port] = udp_server_socket
+            logger.info(f"Listening for UDP on port {port}...")
+        except Exception as e:
+            logger.error(f"Failed to set up UDP socket on port {port}: {e}")
 
-    # Lista de todos los sockets de servidor para select
+    # All server sockets for select
     inputs = list(tcp_server_sockets.values()) + list(udp_server_sockets.values())
+    
+    # Start JSON sender thread
+    json_sender = threading.Thread(target=process_json_queue)
+    json_sender.daemon = True
+    json_sender.start()
+    
+    # Start connection monitor thread
+    connection_monitor = threading.Thread(target=monitor_connections)
+    connection_monitor.daemon = True
+    connection_monitor.start()
 
-    # Lista de sockets que esperan escritura (para respuestas no bloqueantes)
-    outputs = []
-
-    # Diccionario para mensajes pendientes
-    message_queues = {}
-
-    # Iniciar hilo para limpieza de conexiones inactivas
-    cleaner = threading.Thread(target=cleanup_idle_connections)
-    cleaner.daemon = True
-    cleaner.start()
-
-    # Iniciar el procesador de mensajes para conexiones UDP
-    message_processor = threading.Thread(target=process_message_queues)
-    message_processor.daemon = True
-    message_processor.start()
-
-    # Mantener el servidor funcionando
+    # Keep server running
     try:
         while True:
-            # Usar select para monitorear múltiples sockets sin bloquear
-            readable, writable, exceptional = select.select(
-                inputs + list(udp_connections["sockets"].values()),
-                outputs,
-                inputs + list(udp_connections["sockets"].values()),
-                0.1,
-            )
-
-            for sock in readable:
-                # Manejar conexiones TCP entrantes
-                tcp_handled = False
-                for port, server_sock in tcp_server_sockets.items():
-                    if sock == server_sock:
-                        tcp_handled = True
-                        # Nueva conexión TCP entrante
-                        client_socket, client_address = server_sock.accept()
-                        logging.debug(
-                            f"Conexión TCP aceptada desde {client_address} en el puerto {port}"
-                        )
-
-                        # Crear un hilo para manejar cada conexión TCP
-                        client_handler = threading.Thread(
-                            target=handle_device_data, args=(port, client_socket)
-                        )
-                        client_handler.daemon = True
-                        client_handler.start()
-
-                # Manejar datos UDP entrantes
-                udp_handled = False
-                for port, server_sock in udp_server_sockets.items():
-                    if sock == server_sock:
-                        udp_handled = True
-                        # Datos UDP entrantes
-                        try:
-                            data, client_address = server_sock.recvfrom(1024)
-                            logging.debug(
-                                f"Datos UDP recibidos desde {client_address} en el puerto {port}"
-                            )
-
-                            # Verificar si el comando es para desactivar o activar un número
-                            command = data.decode("utf-8", errors="ignore")
-                            if command.startswith("desactivate:"):
-                                number = command.split(":")[1]
-                                omit_numbers[number] = True
-                                logging.info(f"Número {number} desactivado.")
-                                continue
-                            elif command.startswith("activate:"):
-                                number = command.split(":")[1]
-                                if number in omit_numbers:
-                                    del omit_numbers[number]
-                                logging.info(f"Número {number} activado.")
-                                continue
-
-                            # Manejar los datos UDP de forma no bloqueante
-                            handle_udp_data(port, data, client_address, server_sock)
-
-                        except Exception as e:
-                            logging.error(
-                                f"Error al recibir datos UDP en puerto {port}: {e}"
-                            )
-
-                # Manejar respuestas de Traccar para UDP (completamente no bloqueante)
-                if not tcp_handled and not udp_handled:
-                    # Este socket debe ser una conexión Traccar
-                    for device_id, traccar_socket in udp_connections["sockets"].items():
-                        if sock == traccar_socket:
-                            try:
-                                response_data = sock.recv(1024)
-                                if response_data:
-                                    # Actualizar timestamp de actividad
-                                    with udp_lock:
-                                        udp_connections["last_active"][
-                                            device_id
-                                        ] = time.time()
-
-                                        # Obtener la dirección del cliente UDP
-                                        if device_id in udp_connections["addresses"]:
-                                            client_address = udp_connections[
-                                                "addresses"
-                                            ][device_id]
-                                            port = int(device_id.split("_")[0])
-
-                                            # Enviar respuesta directamente (no bloqueante)
-                                            for (
-                                                server_sock
-                                            ) in udp_server_sockets.values():
-                                                try:
-                                                    server_sock.sendto(
-                                                        response_data, client_address
-                                                    )
-                                                    logging.debug(
-                                                        f"Respuesta de Traccar al cliente UDP {client_address}: {len(response_data)} bytes"
-                                                    )
-                                                    break
-                                                except:
-                                                    continue
-                                else:
-                                    # Conexión cerrada por Traccar
-                                    logging.debug(
-                                        f"Conexión cerrada por Traccar para {device_id}"
-                                    )
-                                    with udp_lock:
-                                        if device_id in udp_connections["sockets"]:
-                                            try:
-                                                udp_connections["sockets"][
-                                                    device_id
-                                                ].close()
-                                            except:
-                                                pass
-                                            del udp_connections["sockets"][device_id]
-                            except Exception as e:
-                                logging.error(
-                                    f"Error al leer respuesta de Traccar para {device_id}: {e}"
-                                )
-                                with udp_lock:
-                                    if device_id in udp_connections["sockets"]:
-                                        try:
-                                            udp_connections["sockets"][
-                                                device_id
-                                            ].close()
-                                        except:
-                                            pass
-                                        del udp_connections["sockets"][device_id]
-
-            # Verificar sockets con problemas
-            for sock in exceptional:
-                logging.error(f"Error en socket, cerrando...")
-
-                # Cerrar socket de servidor si es necesario
-                for port, server_sock in tcp_server_sockets.items():
-                    if sock == server_sock:
-                        sock.close()
-                        # Recrear socket
-                        new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                        new_sock.setblocking(0)
-                        new_sock.bind(("0.0.0.0", port))
-                        new_sock.listen(200)
-                        tcp_server_sockets[port] = new_sock
-                        inputs.remove(sock)
-                        inputs.append(new_sock)
-                        logging.info(
-                            f"Socket TCP del servidor en puerto {port} recreado"
-                        )
-
-                for port, server_sock in udp_server_sockets.items():
-                    if sock == server_sock:
-                        sock.close()
-                        # Recrear socket
-                        new_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                        new_sock.setblocking(0)
-                        new_sock.bind(("0.0.0.0", port))
-                        udp_server_sockets[port] = new_sock
-                        inputs.remove(sock)
-                        inputs.append(new_sock)
-                        logging.info(
-                            f"Socket UDP del servidor en puerto {port} recreado"
-                        )
-
-                # Verificar si es un socket Traccar
-                for device_id, traccar_socket in list(
-                    udp_connections["sockets"].items()
-                ):
-                    if sock == traccar_socket:
-                        with udp_lock:
-                            try:
-                                sock.close()
-                            except:
-                                pass
-                            if device_id in udp_connections["sockets"]:
-                                del udp_connections["sockets"][device_id]
-                            logging.debug(
-                                f"Socket Traccar para {device_id} cerrado por error"
-                            )
-
-            # Pequeña pausa para evitar consumo excesivo de CPU
-            time.sleep(0.005)
-
-    except KeyboardInterrupt:
-        logging.info("Cerrando el servidor...")
-    finally:
-        # Cerrar todos los sockets del servidor
-        for port, server_socket in tcp_server_sockets.items():
-            server_socket.close()
-            logging.info(f"Socket TCP del servidor en puerto {port} cerrado")
-        for port, server_socket in udp_server_sockets.items():
-            server_socket.close()
-            logging.info(f"Socket UDP del servidor en puerto {port} cerrado")
-
-        # Cerrar conexiones persistentes a Traccar
-        with udp_lock:
-            for device_id, sock in udp_connections["sockets"].items():
-                if sock:
-                    try:
-                        sock.close()
-                    except:
-                        pass
-
-
-# Función para limpiar conexiones inactivas periódicamente
-def cleanup_idle_connections():
-    while True:
-        try:
-            current_time = time.time()
-            to_remove = []
-
-            with udp_lock:
-                # Identificar conexiones inactivas
-                for device_id, last_active in udp_connections["last_active"].items():
-                    if current_time - last_active > MAX_IDLE_TIME:
-                        to_remove.append(device_id)
-
-                # Eliminar conexiones inactivas
-                for device_id in to_remove:
-                    if (
-                        device_id in udp_connections["sockets"]
-                        and udp_connections["sockets"][device_id]
-                    ):
-                        try:
-                            udp_connections["sockets"][device_id].close()
-                        except:
-                            pass
-                        del udp_connections["sockets"][device_id]
-
-                    if device_id in udp_connections["addresses"]:
-                        del udp_connections["addresses"][device_id]
-
-                    if device_id in udp_connections["last_active"]:
-                        del udp_connections["last_active"][device_id]
-
-                    if device_id in udp_connections["message_queue"]:
-                        del udp_connections["message_queue"][device_id]
-
-                    logging.info(f"Conexión inactiva eliminada para {device_id}")
-
-        except Exception as e:
-            logging.error(f"Error en cleanup_idle_connections: {e}")
-
-        # Revisar cada 60 segundos
-        time.sleep(60)
-
-
-# Función para procesar las colas de mensajes
-def process_message_queues():
-    while True:
-        try:
-            with udp_lock:
-                # Procesar mensajes en cola para cada dispositivo
-                for device_id, queue in list(udp_connections["message_queue"].items()):
-                    if not queue:
-                        continue
-
-                    # Verificar si tenemos una conexión activa
-                    if (
-                        device_id not in udp_connections["sockets"]
-                        or not udp_connections["sockets"][device_id]
-                    ):
-                        # Intentar establecer conexión
-                        try:
-                            port = int(device_id.split("_")[0])
-                            traccar_socket = socket.socket(
-                                socket.AF_INET, socket.SOCK_STREAM
-                            )
-                            traccar_socket.connect((TRACCAR_HOST, DEVICE_PORTS[port]))
-                            traccar_socket.setblocking(
-                                0
-                            )  # Configurar como no bloqueante
-                            udp_connections["sockets"][device_id] = traccar_socket
-                            logging.debug(f"Conexión establecida para {device_id}")
-                        except Exception as e:
-                            logging.error(
-                                f"No se pudo establecer conexión para {device_id}: {e}"
-                            )
-                            continue
-
-                    # Intentar enviar el mensaje más antiguo
-                    sock = udp_connections["sockets"][device_id]
-                    data = queue[0]
-
-                    try:
-                        sock.sendall(data)
-                        # Mensaje enviado, eliminar de la cola
-                        queue.popleft()
-                        udp_connections["last_active"][device_id] = time.time()
-                        logging.debug(
-                            f"Mensaje enviado desde cola para {device_id}, {len(queue)} pendientes"
-                        )
-                    except socket.error as e:
-                        # Socket no listo para escritura, intentar más tarde
-                        if e.errno == socket.EAGAIN or e.errno == socket.EWOULDBLOCK:
-                            pass
-                        else:
-                            # Error en socket, cerrar y reintentar después
-                            logging.error(
-                                f"Error al enviar mensaje desde cola para {device_id}: {e}"
-                            )
-                            try:
-                                sock.close()
-                            except:
-                                pass
-                            udp_connections["sockets"][device_id] = None
-
-        except Exception as e:
-            logging.error(f"Error en process_message_queues: {e}")
-
-        # Procesar rápidamente sin consumir mucha CPU
-        time.sleep(0.01)
-
-
-# Función para generar un identificador único para dispositivos UDP
-def get_device_id(port, client_address):
-    return f"{port}_{client_address[0]}_{client_address[1]}"
-
-
-# Función mejorada para manejar datos UDP de forma no bloqueante
-def handle_udp_data(port, data, client_address, udp_server_socket):
-    try:
-        # Generar un identificador para este dispositivo
-        device_id = get_device_id(port, client_address)
-
-        # Verificar si el número está en la lista de omitidos y si contiene "tracker"
-        decoded_data = data.decode("utf-8", errors="ignore")
-        for number in omit_numbers:
-            if number in decoded_data and "tracker" in decoded_data:
-                logging.info(f"Datos omitidos para el número {number}.")
-                return
-
-        # Enviar los datos al puerto JSON (no bloqueante)
-        try:
-            threading.Thread(
-                target=send_to_json_port, args=(port, data), daemon=True
-            ).start()
-        except:
-            pass
-
-        with udp_lock:
-            # Actualizar la dirección del cliente
-            udp_connections["addresses"][device_id] = client_address
-            udp_connections["last_active"][device_id] = time.time()
-
-            # Inicializar cola de mensajes si no existe
-            if device_id not in udp_connections["message_queue"]:
-                udp_connections["message_queue"][device_id] = deque(
-                    maxlen=MAX_QUEUE_SIZE
-                )
-
-            # Añadir mensaje a la cola
-            udp_connections["message_queue"][device_id].append(data)
-
-            # Verificar si podemos enviar inmediatamente (socket existente y no bloqueado)
-            if (
-                device_id in udp_connections["sockets"]
-                and udp_connections["sockets"][device_id]
-            ):
-                try:
-                    # Intentar enviar sin bloquear
-                    sock = udp_connections["sockets"][device_id]
-                    sock.sendall(data)
-                    # Si éxito, eliminar de la cola
-                    udp_connections["message_queue"][device_id].popleft()
-                    logging.debug(
-                        f"Datos UDP enviados directamente a Traccar para {device_id}: {len(data)} bytes"
-                    )
-                except socket.error as e:
-                    if e.errno != socket.EAGAIN and e.errno != socket.EWOULDBLOCK:
-                        # Error grave, cerrar socket
-                        logging.error(f"Error al enviar datos a Traccar: {e}")
-                        try:
-                            sock.close()
-                        except:
-                            pass
-                        udp_connections["sockets"][device_id] = None
-                except Exception as e:
-                    logging.error(f"Error general al enviar datos a Traccar: {e}")
-
-    except Exception as e:
-        logging.error(f"Error general al manejar datos UDP en puerto {port}: {e}")
-
-
-# Función para reenviar datos entre dos sockets (TCP) de forma no bloqueante
-def forward_data(
-    source_socket, destination_socket, source_name, dest_name, buffer_size=1024
-):
-    try:
-        # Leer datos del socket de origen
-        data = source_socket.recv(buffer_size)
-        if not data:
-            logging.debug(f"Conexión cerrada desde {source_name}")
-            return None
-
-        # Enviar datos al socket de destino
-        destination_socket.sendall(data)
-        logging.debug(f"De {source_name} a {dest_name}: {len(data)} bytes")
-
-        return data  # Devolver los datos para que puedan usarse con JSON_PORT
-    except Exception as e:
-        logging.error(f"Error de {source_name} a {dest_name}: {e}")
-        return None
-
-
-# Función para manejar los datos de un dispositivo (TCP)
-def handle_device_data(port, client_socket):
-    traccar_socket = None
-    try:
-        # Conectar al servidor Traccar para el puerto correspondiente
-        traccar_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            traccar_socket.connect((TRACCAR_HOST, DEVICE_PORTS[port]))
-        except socket.error as e:
-            logging.error(
-                f"Conexión rechazada por Traccar en puerto {DEVICE_PORTS[port]}. ¿El servidor está ejecutándose? Error: {e}"
-            )
-            return
-
-        # Configuración bidireccional - permitir respuestas de Traccar al dispositivo
-        device_name = f"dispositivo (puerto {port})"
-        traccar_name = f"Traccar (puerto {DEVICE_PORTS[port]})"
-
-        # Configurar sockets como no bloqueantes para select
-        client_socket.setblocking(0)
-        traccar_socket.setblocking(0)
-
-        # Monitorear ambos sockets
-        inputs = [client_socket, traccar_socket]
-        running = True
-
-        while running:
             try:
-                readable, _, exceptional = select.select(inputs, [], inputs, 1)
+                # Use select to monitor multiple sockets without blocking
+                readable, _, exceptional = select.select(inputs, [], inputs, 0.01)
 
                 for sock in readable:
-                    if sock == client_socket:
-                        # Datos del dispositivo GPS hacia Traccar
-                        data = forward_data(
-                            client_socket, traccar_socket, device_name, traccar_name
-                        )
-                        if data:
-                            # Enviar los datos al puerto JSON en un hilo separado
-                            threading.Thread(
-                                target=send_to_json_port, args=(port, data), daemon=True
-                            ).start()
-                        else:
-                            running = False
-                            break
+                    # Handle incoming TCP connections
+                    for port, server_sock in tcp_server_sockets.items():
+                        if sock == server_sock:
+                            client_socket, client_address = server_sock.accept()
+                            client_socket.setblocking(0)
+                            
+                            # Queue the connection handling task
+                            worker_queue.put((handle_tcp_client, (port, client_socket, client_address)))
 
-                    elif sock == traccar_socket:
-                        # Datos de Traccar hacia el dispositivo GPS (respuesta)
-                        if not forward_data(
-                            traccar_socket, client_socket, traccar_name, device_name
-                        ):
-                            running = False
-                            break
+                    # Handle incoming UDP data
+                    for port, server_sock in udp_server_sockets.items():
+                        if sock == server_sock:
+                            try:
+                                data, client_address = server_sock.recvfrom(4096)
+                                
+                                # Queue the UDP data handling task
+                                worker_queue.put((handle_udp_data, (port, data, client_address, server_sock)))
+                            except Exception as e:
+                                logger.error(f"Error receiving UDP data on port {port}: {e}")
 
-                # Verificar sockets con problemas
+                # Check problem sockets
                 for sock in exceptional:
-                    logging.error(f"Error en socket durante comunicación, cerrando...")
-                    running = False
+                    logger.error(f"Socket error, closing...")
+                    sock.close()
+                    inputs.remove(sock)
 
-            except (socket.error, socket.timeout) as e:
-                logging.error(f"Conexión reiniciada o abortada: {e}")
-                running = False
             except Exception as e:
-                logging.error(f"Error durante la comunicación de datos: {e}")
-                running = False
+                logger.error(f"Error in main loop: {e}")
+                # Small sleep to avoid CPU overload in case of repeated errors
+                time.sleep(0.1)
 
-    except Exception as e:
-        logging.error(f"Error al manejar conexión en puerto {port}: {e}")
-
+    except KeyboardInterrupt:
+        logger.info("Shutting down server...")
     finally:
-        # Cerrar las conexiones
+        # Clean shutdown
+        for _, socket in tcp_server_sockets.items():
+            socket.close()
+        for _, socket in udp_server_sockets.items():
+            socket.close()
+        
+        # Close all connections
+        with tcp_lock:
+            for conn in tcp_connections.values():
+                try:
+                    if conn:
+                        conn.close()
+                except:
+                    pass
+        
+        with udp_lock:
+            for conn in udp_connections.values():
+                try:
+                    if conn:
+                        conn.close()
+                except:
+                    pass
+
+# Function to monitor connections
+def monitor_connections():
+    while True:
+        try:
+            # Log stats periodically
+            with worker_lock:
+                active = active_workers
+            
+            with tcp_lock:
+                tcp_count = len(tcp_connections)
+            
+            with udp_lock:
+                udp_count = len(udp_connections)
+            
+            json_size = json_queue.qsize()
+            
+            logger.info(f"Status: Active workers: {active}/{MAX_WORKERS}, TCP connections: {tcp_count}, UDP connections: {udp_count}, JSON queue: {json_size}")
+            
+            # Clean up stale connections
+            clean_stale_connections()
+            
+        except Exception as e:
+            logger.error(f"Error in connection monitor: {e}")
+        
+        time.sleep(60)  # Check every minute
+
+# Clean up stale connections
+def clean_stale_connections():
+    current_time = time.time()
+    cleanup_threshold = 3600  # 1 hour
+    
+    with tcp_lock:
+        stale_connections = []
+        for key, (conn, last_activity) in list(tcp_connections.items()):
+            if current_time - last_activity > cleanup_threshold:
+                stale_connections.append(key)
+        
+        for key in stale_connections:
+            try:
+                conn, _ = tcp_connections[key]
+                conn.close()
+            except:
+                pass
+            del tcp_connections[key]
+    
+    with udp_lock:
+        stale_connections = []
+        for key, (conn, last_activity) in list(udp_connections.items()):
+            if current_time - last_activity > cleanup_threshold:
+                stale_connections.append(key)
+        
+        for key in stale_connections:
+            try:
+                conn, _ = udp_connections[key]
+                conn.close()
+            except:
+                pass
+            del udp_connections[key]
+            if key in udp_client_addresses:
+                del udp_client_addresses[key]
+
+# Function to handle TCP client
+def handle_tcp_client(port, client_socket, client_address):
+    traccar_socket = None
+    client_id = f"TCP_{port}_{client_address[0]}_{client_address[1]}_{time.time()}"
+    
+    try:
+        # Connect to Traccar server
+        traccar_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        traccar_socket.settimeout(5)
+        traccar_socket.connect((TRACCAR_HOST, DEVICE_PORTS[port]))
+        traccar_socket.setblocking(0)
+        
+        # Store connection with timestamp
+        with tcp_lock:
+            tcp_connections[client_id] = (traccar_socket, time.time())
+        
+        # Set up for bidirectional communication
+        running = True
+        
+        while running:
+            # Wait for data from either side
+            readable, _, exceptional = select.select([client_socket, traccar_socket], [], [client_socket, traccar_socket], 0.1)
+            
+            for sock in readable:
+                if sock == client_socket:
+                    # Data from GPS device to Traccar
+                    data = sock.recv(4096)
+                    if not data:
+                        running = False
+                        break
+                    
+                    # Forward to Traccar
+                    traccar_socket.sendall(data)
+                    
+                    # Add to JSON queue
+                    add_to_json_queue(port, data)
+                    
+                    # Update last activity
+                    with tcp_lock:
+                        if client_id in tcp_connections:
+                            tcp_connections[client_id] = (traccar_socket, time.time())
+                
+                elif sock == traccar_socket:
+                    # Data from Traccar to GPS device
+                    data = sock.recv(4096)
+                    if not data:
+                        running = False
+                        break
+                    
+                    # Forward to GPS device
+                    client_socket.sendall(data)
+            
+            # Check for socket errors
+            for sock in exceptional:
+                running = False
+                break
+    
+    except Exception as e:
+        logger.debug(f"TCP connection error for {client_id}: {e}")
+    
+    finally:
+        # Clean up
         if client_socket:
             try:
                 client_socket.close()
             except:
                 pass
+        
         if traccar_socket:
             try:
                 traccar_socket.close()
             except:
                 pass
-        logging.debug(f"Conexión finalizada para dispositivo en puerto {port}")
+        
+        # Remove from connections
+        with tcp_lock:
+            if client_id in tcp_connections:
+                del tcp_connections[client_id]
 
+# Function to get device ID for UDP
+def get_device_id(port, client_address):
+    return f"UDP_{port}_{client_address[0]}_{client_address[1]}"
 
-# Función para enviar los datos en formato JSON al puerto 7005
-def send_to_json_port(port, data):
-    json_socket = None
+# Function to handle UDP data
+def handle_udp_data(port, data, client_address, udp_server_socket):
     try:
-        # Intentar decodificar los datos como UTF-8, si falla usar hexadecimal
+        # Generate device ID
+        device_id = get_device_id(port, client_address)
+        
+        # Add to JSON queue
+        add_to_json_queue(port, data)
+        
+        with udp_lock:
+            # Save client address for sending responses
+            udp_client_addresses[device_id] = client_address
+            
+            # Check if connection to Traccar exists
+            if device_id not in udp_connections or not udp_connections[device_id][0]:
+                # Create a new connection to Traccar
+                traccar_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                traccar_socket.settimeout(5)
+                traccar_socket.connect((TRACCAR_HOST, DEVICE_PORTS[port]))
+                traccar_socket.setblocking(0)
+                udp_connections[device_id] = (traccar_socket, time.time())
+            else:
+                # Use existing connection
+                traccar_socket, _ = udp_connections[device_id]
+                # Update last activity
+                udp_connections[device_id] = (traccar_socket, time.time())
+        
+        # Send data to Traccar
+        traccar_socket.sendall(data)
+        
+        # Start a thread to listen for Traccar response
+        worker_queue.put((listen_for_traccar_udp_response, (device_id, udp_server_socket)))
+        
+    except Exception as e:
+        logger.debug(f"UDP handling error for device at {client_address}: {e}")
+        # Clean up connection if needed
+        with udp_lock:
+            if device_id in udp_connections:
+                try:
+                    traccar_socket, _ = udp_connections[device_id]
+                    traccar_socket.close()
+                except:
+                    pass
+                udp_connections[device_id] = (None, time.time())
+
+# Function to listen for Traccar responses to UDP devices
+def listen_for_traccar_udp_response(device_id, udp_server_socket):
+    try:
+        with udp_lock:
+            if device_id not in udp_connections or not udp_connections[device_id][0]:
+                return
+            
+            traccar_socket, _ = udp_connections[device_id]
+            
+            if device_id not in udp_client_addresses:
+                return
+            
+            client_address = udp_client_addresses[device_id]
+        
+        # Set a short timeout
+        traccar_socket.setblocking(0)
+        
+        # Check for data with select
+        readable, _, _ = select.select([traccar_socket], [], [], 0.5)
+        
+        if readable:
+            response_data = traccar_socket.recv(4096)
+            if response_data:
+                # Send response back to UDP client
+                udp_server_socket.sendto(response_data, client_address)
+    
+    except Exception as e:
+        logger.debug(f"Error getting Traccar response for UDP device {device_id}: {e}")
+        # Clean up connection
+        with udp_lock:
+            if device_id in udp_connections:
+                try:
+                    traccar_socket, _ = udp_connections[device_id]
+                    traccar_socket.close()
+                except:
+                    pass
+                udp_connections[device_id] = (None, time.time())
+
+# Function to add data to JSON queue
+def add_to_json_queue(port, data):
+    try:
+        # Try to decode data
         try:
-            decoded_data = data.decode("utf-8", errors="replace")
+            decoded_data = data.decode('utf-8', errors='replace')
         except:
             decoded_data = data.hex()
-
-        # Crear un socket para enviar los datos en formato JSON
-        json_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        json_socket.settimeout(1)  # Timeout corto para no bloquear
-
-        # Conectar al puerto 7005
+        
+        # Create JSON data
+        json_data = {
+            "port": port,
+            "data": decoded_data,
+            "timestamp": time.time()
+        }
+        
+        # Try to add to queue without blocking
         try:
-            json_socket.connect(("localhost", JSON_PORT))
-
-            # Crear el diccionario con los datos y puerto
-            json_data = {"port": port, "data": decoded_data, "timestamp": time.time()}
-
-            # Convertir a JSON y enviar
-            json_socket.sendall(json.dumps(json_data).encode("utf-8"))
-        except socket.error:
-            # Silenciosamente fallar si el puerto JSON no está disponible
-            pass
-
+            json_queue.put_nowait(json_data)
+        except:
+            # Queue full, log once per minute
+            current_time = int(time.time())
+            if current_time % 60 == 0:
+                logger.warning("JSON queue full, dropping data")
+    
     except Exception as e:
-        logging.error(f"Error al enviar datos al puerto JSON: {e}")
+        logger.error(f"Error adding to JSON queue: {e}")
 
-    finally:
-        # Cerrar el socket
-        if json_socket:
+# Function to process JSON queue
+def process_json_queue():
+    while True:
+        try:
+            # Get item from queue with timeout
+            json_data = json_queue.get(timeout=0.5)
+            
+            # Try to send to JSON port
+            json_socket = None
             try:
-                json_socket.close()
-            except:
-                pass
+                json_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                json_socket.settimeout(1)  # Short timeout
+                
+                # Connect to JSON port
+                try:
+                    json_socket.connect(("localhost", JSON_PORT))
+                    
+                    # Send JSON data
+                    json_socket.sendall(json.dumps(json_data).encode('utf-8'))
+                except socket.error:
+                    # Silently fail if JSON port not available
+                    pass
+            
+            except Exception as e:
+                logger.debug(f"Error sending to JSON port: {e}")
+            
+            finally:
+                # Close socket
+                if json_socket:
+                    try:
+                        json_socket.close()
+                    except:
+                        pass
+                
+                # Mark task as done
+                json_queue.task_done()
+        
+        except:
+            # No items in queue, sleep briefly
+            time.sleep(0.01)
 
-
-# Iniciar el servidor
+# Main function
 if __name__ == "__main__":
     try:
+        # Initialize worker threads
+        init_workers()
+        
+        # Start listening for data
         listen_for_data()
+    
     except Exception as e:
-        logging.critical(f"Error fatal en el servidor: {e}")
-        # Esperar un momento antes de salir para permitir que se registre el error
-        time.sleep(1)
+        logger.critical(f"Critical error: {e}")
