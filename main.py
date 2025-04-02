@@ -32,6 +32,10 @@ udp_lock = threading.Lock()
 # Diccionario para mantener el estado de los números que deben ser omitidos
 omit_numbers = {}
 
+# Diccionarios para almacenar las conexiones activas
+tcp_connections = {}
+udp_connections = {}
+
 # Configuración del logger
 log_folder = "logs"
 if not os.path.exists(log_folder):
@@ -103,6 +107,7 @@ def listen_for_data():
                         logger.debug(
                             f"Conexión TCP aceptada desde {client_address} en el puerto {port}"
                         )
+                        tcp_connections[client_socket] = client_address
 
                         # Crear un hilo para manejar cada conexión TCP
                         client_handler = threading.Thread(
@@ -121,6 +126,7 @@ def listen_for_data():
                                 f"Datos UDP recibidos desde {client_address} en el puerto {port}"
                             )
                             logger.debug(f"Datos recibidos: {data}")
+                            udp_connections[client_address] = server_sock
 
                             # Verificar si el comando es para desactivar o activar un número
                             command = data.decode("utf-8", errors="ignore")
@@ -149,6 +155,10 @@ def listen_for_data():
                 logger.error("Error en socket, cerrando...")
                 sock.close()
                 inputs.remove(sock)
+
+            # Imprimir la cantidad de conexiones activas
+            print(f"Conexiones TCP activas: {len(tcp_connections)}")
+            print(f"Conexiones UDP activas: {len(udp_connections)}")
 
             # Pequeña pausa para evitar consumo excesivo de CPU
             time.sleep(0.01)
@@ -320,6 +330,11 @@ def listen_for_traccar_response(device_id, udp_server_socket):
     retries = 0
     while retries < max_retries:
         try:
+            # Verificar si el socket es válido
+            if traccar_socket.fileno() == -1:
+                logger.error(f"Socket inválido para {device_id}")
+                return
+
             # Configurar el socket para no bloquear pero con un timeout
             traccar_socket.setblocking(0)
 
