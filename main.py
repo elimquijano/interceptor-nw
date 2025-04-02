@@ -68,7 +68,7 @@ def listen_for_data():
         tcp_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         tcp_server_socket.setblocking(0)
         tcp_server_socket.bind(("0.0.0.0", port))
-        tcp_server_socket.listen(200)
+        tcp_server_socket.listen(25)
         tcp_server_sockets[port] = tcp_server_socket
         logger.debug(f"Escuchando TCP en el puerto {port}...")
 
@@ -301,6 +301,9 @@ def handle_udp_data(port, data, client_address, udp_server_socket):
 
 # Función para escuchar respuestas de Traccar para dispositivos UDP
 def listen_for_traccar_response(device_id, udp_server_socket):
+    max_retries = 3
+    retry_delay = 0.5  # Tiempo de espera entre reintentos en segundos
+
     with udp_lock:
         if (
             device_id not in udp_traccar_connections
@@ -314,37 +317,56 @@ def listen_for_traccar_response(device_id, udp_server_socket):
 
         client_address = udp_client_addresses[device_id]
 
-    try:
-        # Configurar el socket para no bloquear pero con un timeout
-        traccar_socket.setblocking(0)
+    retries = 0
+    while retries < max_retries:
+        try:
+            # Configurar el socket para no bloquear pero con un timeout
+            traccar_socket.setblocking(0)
 
-        # Usar select para esperar datos sin bloquear completamente
-        ready, _, _ = select.select([traccar_socket], [], [], 0.5)
+            # Usar select para esperar datos sin bloquear completamente
+            ready, _, _ = select.select([traccar_socket], [], [], 0.5)
 
-        if ready:
-            response_data = traccar_socket.recv(1024)
-            if response_data:
-                # Enviar respuesta de vuelta al cliente UDP
-                udp_server_socket.sendto(response_data, client_address)
-                logger.debug(
-                    f"Respuesta de Traccar al cliente UDP {client_address}: {len(response_data)} bytes"
-                )
+            if ready:
+                try:
+                    response_data = traccar_socket.recv(1024)
+                    if response_data:
+                        # Enviar respuesta de vuelta al cliente UDP
+                        udp_server_socket.sendto(response_data, client_address)
+                        logger.debug(
+                            f"Respuesta de Traccar al cliente UDP {client_address}: {len(response_data)} bytes"
+                        )
+                        return  # Salir del bucle si se reciben datos correctamente
+                except socket.error as e:
+                    if (
+                        e.errno != 11
+                    ):  # Ignorar [Errno 11] Resource temporarily unavailable
+                        raise
 
-    except socket.error as e:
-        logger.error(
-            f"Error de socket al escuchar respuesta Traccar para {device_id}: {e}"
-        )
-        # Marcar la conexión como cerrada para que se restablezca
-        with udp_lock:
-            try:
-                traccar_socket.close()
-            except:
-                pass
-            udp_traccar_connections[device_id] = None
-    except Exception as e:
-        logger.error(
-            f"Error al procesar respuesta de Traccar para UDP {device_id}: {e}"
-        )
+            # Incrementar el contador de reintentos y esperar antes de reintentar
+            retries += 1
+            time.sleep(retry_delay)
+
+        except socket.error as e:
+            logger.error(
+                f"Error de socket al escuchar respuesta Traccar para {device_id}: {e}"
+            )
+            # Marcar la conexión como cerrada para que se restablezca
+            with udp_lock:
+                try:
+                    traccar_socket.close()
+                except:
+                    pass
+                udp_traccar_connections[device_id] = None
+            return
+        except Exception as e:
+            logger.error(
+                f"Error al procesar respuesta de Traccar para UDP {device_id}: {e}"
+            )
+            return
+
+    logger.warning(
+        f"No se recibió respuesta de Traccar para {device_id} después de {max_retries} reintentos"
+    )
 
 
 # Función para reenviar datos entre dos sockets (TCP)
@@ -361,6 +383,7 @@ def forward_data(
         # Enviar datos al socket de destino
         destination_socket.sendall(data)
         logger.debug(f"De {source_name} a {dest_name}: {len(data)} bytes")
+        print(f"Datos recibidos de {source_name}: {data}")
 
         return data  # Devolver los datos para que puedan usarse con JSON_PORT
     except Exception as e:
