@@ -1,2 +1,8 @@
-prueba.py
+# Omitir la carpeta logs
+logs/
+
+# Omitir todos los archivos con extensión .log
 *.log
+
+# Omitir el archivo omit_list.txt
+omit_list.txt
