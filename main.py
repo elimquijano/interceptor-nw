@@ -98,22 +98,61 @@ def load_omitted_identifiers(filename=OMIT_FILENAME):
 
 # --- Función para verificar si se debe omitir ---
 def should_omit(data):
-    """Verifica si los datos contienen algún identificador de la lista de omisión."""
+    """
+    Verifica si los datos deben omitirse.
+    Omite SÓLO SI los datos contienen un identificador de la lista de omisión
+    Y TAMBIÉN contienen la cadena específica 'tracker'.
+    """
     try:
+        # Intentar decodificar como texto. Si falla, no podemos verificar las cadenas.
         decoded_for_check = data.decode("utf-8", errors="ignore")
-        with omit_lock:
+
+        # Variable para registrar si encontramos un ID de la lista
+        identifier_found_in_message = None
+
+        with omit_lock:  # Acceso seguro al set
             if not omit_identifiers:
+                # Si no hay identificadores para omitir, no hay nada que hacer.
                 return False
+
+            # 1. Buscar si algún identificador de la lista está en el mensaje
             for identifier in omit_identifiers:
                 if identifier in decoded_for_check:
-                    logging.info(
-                        f"Omitiendo datos que contienen el identificador: {identifier}"
+                    identifier_found_in_message = (
+                        identifier  # Guardamos cuál encontramos
                     )
-                    return True
+                    break  # Encontramos uno, suficiente para este paso
+
+        # 2. Si encontramos un identificador de la lista, verificar AHORA si contiene 'tracker'
+        if identifier_found_in_message:
+            # Comprobar si la cadena 'tracker' está presente (sensible a mayúsculas/minúsculas)
+            # Si necesitas que sea insensible, usa: "tracker".lower() in decoded_for_check.lower()
+            if "tracker" in decoded_for_check:
+                # ¡Ambas condiciones se cumplen! Omitir este mensaje.
+                logging.info(
+                    f"Omitiendo mensaje que contiene 'tracker' del identificador omitido: {identifier_found_in_message}"
+                )
+                return True  # Sí, omitir
+            else:
+                # El identificador está, pero 'tracker' no. NO omitir este mensaje.
+                logging.debug(
+                    f"Mensaje del identificador omitido {identifier_found_in_message} permitido (no contiene 'tracker')."
+                )
+                return False  # No omitir
+        else:
+            # No se encontró ningún identificador de la lista en el mensaje. No omitir.
+            return False
+
+    except UnicodeDecodeError:
+        # Si no se puede decodificar como UTF-8, no podemos buscar las cadenas. No omitir.
+        logging.debug(
+            "No se pudo decodificar el mensaje como UTF-8 para verificar omisión."
+        )
+        return False
     except Exception as e:
-        logging.debug(f"Error durante la verificación de omisión: {e}")
-        pass
-    return False
+        # En caso de cualquier otro error, es más seguro no omitir.
+        logging.error(f"Error inesperado durante la verificación de omisión: {e}")
+        return False  # No omitir por defecto en caso de error
 
 
 # --- Función para enviar datos al puerto JSON ---
