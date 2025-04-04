@@ -52,24 +52,42 @@ udp_map_lock = asyncio.Lock()
 
 # --- Configuración del Logging ---
 def setup_logging():
+    """Configura el logging para escribir a archivo diario y a consola
+    (formato simplificado sin taskName)."""
     log_dir = "logs"
     os.makedirs(log_dir, exist_ok=True)
     log_filename = os.path.join(
         log_dir, f"log-asyncio-{datetime.now().strftime('%Y-%m-%d')}.log"
     )
+
+    # Formato SIMPLIFICADO: Eliminamos {%(taskName)s}
+    # Podemos mantener threadName si queremos, aunque será menos variado con asyncio
+    log_format = "%(asctime)s [%(levelname)s] {%(threadName)s} %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+
+    # Configuración básica que aplica el formato a los handlers por defecto
     logging.basicConfig(
         level=logging.DEBUG,
-        format="%(asctime)s [%(levelname)s] {%(taskName)s} %(message)s",  # Usar taskName con asyncio
-        datefmt="%Y-%m-%d %H:%M:%S",
+        format=log_format,
+        datefmt=date_format,
         handlers=[
             logging.FileHandler(log_filename, encoding="utf-8"),
             logging.StreamHandler(sys.stdout),
         ],
     )
-    # Poner nombre a la tarea principal
-    asyncio.current_task().set_name("MainLoop")
+
+    # Nombrar la tarea principal sigue siendo una buena práctica (opcional)
+    try:
+        # Intentar obtener la tarea actual y nombrarla no causa el error de formato
+        task = asyncio.current_task()
+        if task:  # Verificar si realmente hay una tarea
+            task.set_name("MainThreadTask")
+    except RuntimeError:
+        pass  # No hay loop/tarea corriendo aún
+
     logging.info(
-        "Logging Asyncio configurado. Nivel: DEBUG. Escribiendo a: %s", log_filename
+        "Logging Asyncio configurado (formato simple). Nivel: DEBUG. Escribiendo a: %s",
+        log_filename,
     )
 
 
